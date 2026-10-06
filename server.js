@@ -20,6 +20,7 @@ const tableRoutes = require('./src/routes/tableRoutes');
 const teamRoutes = require('./src/routes/teamRoutes');
 const leagueRoutes = require('./src/routes/leagueRoutes');
 const transferRoutes = require('./src/routes/transferRoutes');
+const metaRoutes = require('./src/routes/metaRoutes');
 
 const app = express();
 
@@ -28,9 +29,25 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cors());
 
-// Serve static files from public directory
-app.use(express.static(path.join(__dirname, 'public')));
-app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
+// Serve static public assets with headers that allow external crawlers to load images
+app.use(express.static(path.join(__dirname, 'public'), {
+  setHeaders(res, filePath) {
+    // Allow social crawlers (WhatsApp, Facebook, Twitter…) to fetch images
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+    // Cache static assets for 1 hour
+    if (/\.(png|jpe?g|webp|gif|svg|ico)$/i.test(filePath)) {
+      res.set('Cache-Control', 'public, max-age=3600, stale-while-revalidate=86400');
+    }
+  }
+}));
+app.use('/uploads', express.static(path.join(__dirname, 'public/uploads'), {
+  setHeaders(res) {
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.set('Cache-Control', 'public, max-age=3600, stale-while-revalidate=86400');
+  }
+}));
 
 // Mount API Routers
 app.use('/api/v1/auth', authRoutes);
@@ -43,7 +60,13 @@ app.use('/api/v1/teams', teamRoutes);
 app.use('/api/v1/leagues', leagueRoutes);
 app.use('/api/v1/transfers', transferRoutes);
 
-// Single Page Web Dashboard entry route
+// ── Social Media Meta Route ──────────────────────────────────────────────────
+// MUST be mounted BEFORE the SPA catch-all so that social crawlers requesting
+// GET /news/:slug receive server-rendered HTML with full OG/Twitter/JSON-LD
+// metadata rather than the generic admin index.html.
+app.use('/news', metaRoutes);
+
+// Single Page Web Dashboard entry route (catch-all for all other paths)
 app.use((req, res, next) => {
   if (req.path.startsWith('/api/')) {
     return next();

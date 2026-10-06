@@ -47,16 +47,26 @@ const seedDatabase = async () => {
       console.log('[Seeder] Editor initialized: editor@dxsport.com / editor123');
     }
 
-    // 4. Seed League
-    let league = await League.findOne({ code: 'EPL' });
+    // 4. Seed NPFL League
+    let league = await League.findOne({ code: 'NPFL' });
     if (!league) {
-      league = await League.create({
-        name: 'Premier League',
-        season: '2025/2026',
-        code: 'EPL',
-        isActive: true
-      });
-      console.log('[Seeder] Default League Season initialized');
+      // Also check for the old incorrectly-seeded EPL entry and rename it rather
+      // than creating a duplicate league.
+      const oldEpl = await League.findOne({ code: 'EPL', name: 'Premier League' });
+      if (oldEpl) {
+        oldEpl.name = 'Nigeria Premier Football League';
+        oldEpl.code = 'NPFL';
+        await oldEpl.save();
+        console.log('[Seeder] Renamed legacy EPL league → NPFL');
+      } else {
+        await League.create({
+          name: 'Nigeria Premier Football League',
+          season: '2025/2026',
+          code: 'NPFL',
+          isActive: true
+        });
+        console.log('[Seeder] NPFL League Season initialized');
+      }
     }
 
     console.log('[Seeder] System ready for Client testing. Zero dummy posts/matches/teams loaded.');

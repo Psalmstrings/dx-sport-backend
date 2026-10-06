@@ -10,10 +10,28 @@ const slugify = (text) => {
     .replace(/[\s\W-]+/g, '-');
 };
 
+const SITE_URL = process.env.SITE_URL || 'https://dxsportz.com';
+
+/**
+ * Ensure an image URL stored on the post is always an absolute HTTPS URL.
+ * - Cloudinary URLs are already absolute — pass through.
+ * - Relative /uploads/... paths get prefixed with the site URL.
+ * - base64 data URIs are NOT publicly accessible by crawlers; clear them.
+ * - Empty/null returns empty string (meta generator will use default image).
+ */
+const toAbsoluteUrl = (url) => {
+  if (!url || typeof url !== 'string') return '';
+  if (url.startsWith('data:')) return ''; // base64 — not publicly accessible
+  if (url.startsWith('http://') || url.startsWith('https://')) return url;
+  if (url.startsWith('/')) return `${SITE_URL}${url}`;
+  return `${SITE_URL}/${url}`;
+};
+
 const formatPostDoc = (doc) => {
   if (!doc) return doc;
   const p = doc.toObject ? doc.toObject() : { ...doc };
-  p.image = p.coverImage || p.image || '';
+  const rawImage = p.coverImage || p.image || '';
+  p.image = toAbsoluteUrl(rawImage);
   p.coverImage = p.image;
   return p;
 };
