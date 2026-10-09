@@ -1,4 +1,6 @@
 const Match = require('../models/Match');
+const League = require('../models/League');
+const Team = require('../models/Team');
 const tableService = require('../services/tableService');
 const auditService = require('../services/auditService');
 
@@ -25,9 +27,9 @@ const getMatches = async (req, res, next) => {
 
     const [matches, total] = await Promise.all([
       Match.find(query)
-        .populate('homeTeam', 'name shortName code logo stadium city')
-        .populate('awayTeam', 'name shortName code logo stadium city')
-        .populate('league', 'name season code')
+        .populate('homeTeam', 'name shortName code logo stadium city country')
+        .populate('awayTeam', 'name shortName code logo stadium city country')
+        .populate('league', 'name shortName season code type logo standingsEnabled isActive')
         .sort({ matchDate: -1 })
         .skip(skip)
         .limit(Number(limit)),
@@ -53,9 +55,9 @@ const getMatches = async (req, res, next) => {
 const getMatchById = async (req, res, next) => {
   try {
     const match = await Match.findById(req.params.id)
-      .populate('homeTeam', 'name shortName code logo stadium city')
-      .populate('awayTeam', 'name shortName code logo stadium city')
-      .populate('league', 'name season code')
+      .populate('homeTeam', 'name shortName code logo stadium city country')
+      .populate('awayTeam', 'name shortName code logo stadium city country')
+      .populate('league', 'name shortName season code type logo standingsEnabled isActive')
       .populate('updatedBy', 'name email role');
 
     if (!match) {
@@ -74,7 +76,7 @@ const getMatchById = async (req, res, next) => {
   }
 };
 
-// @desc    Create match feature
+// @desc    Create match feature (Competition First & strict membership validation)
 // @route   POST /api/v1/matches
 // @access  Private (Admin, Editor)
 const createMatch = async (req, res, next) => {
@@ -84,48 +86,113 @@ const createMatch = async (req, res, next) => {
     if (!league || !homeTeam || !awayTeam || !matchDate) {
       return res.status(400).json({
         success: false,
-        message: 'League, homeTeam, awayTeam, and matchDate are required'
+        message: 'Competition, Home Team, Away Team, and Match Date are required'
       });
     }
 
-    if (homeTeam === awayTeam) {
+    const homeId = homeTeam.toString();
+    const awayId = awayTeam.toString();
+
+    if (homeId === awayId) {
       return res.status(400).json({
         success: false,
         message: 'Home team and Away team cannot be the same'
       });
     }
 
+    // 1. Validate competition exists and is active
+    const compDoc = await League.findById(league);
+    if (!compDoc) {
+      return res.status(400).json({
+        success: false,
+        message: 'Selected competition does not exist'
+      });
+    }
+    if (!compDoc.isActive) {
+      return res.status(400).json({
+        success: false,
+        message: `Competition "${compDoc.name}" is currently inactive. Please activate it first.`
+      });
+    }
+
+    // 2. Validate teams exist, are active, and have membership in this competition
+    const [homeDoc, awayDoc] = await Promise.all([
+      Team.findById(homeId),
+      Team.findById(awayId)
+    ]);
+
+    if (!homeDoc) {
+      return res.status(400).json({ success: false, message: 'Home team does not exist' });
+    }
+    if (!awayDoc) {
+      return res.status(400).json({ success: false, message: 'Away team does not exist' });
+    }
+
+    if (!homeDoc.isActive) {
+      return res.status(400).json({
+        success: false,
+        message: `Home team "${homeDoc.name}" is marked as inactive`
+      });
+    }
+    if (!awayDoc.isActive) {
+      return res.status(400).json({
+        success: false,
+        message: `Away team "${awayDoc.name}" is marked as inactive`
+      });
+    }
+
+    const leagueIdStr = compDoc._id.toString();
+    const homeMemberships = (homeDoc.competitions || []).map((c) => (c?._id || c).toString());
+    const awayMemberships = (awayDoc.competitions || []).map((c) => (c?._id || c).toString());
+
+    if (!homeMemberships.includes(leagueIdStr)) {
+      return res.status(400).json({
+        success: false,
+        message: `Home team "${homeDoc.name}" is not registered in competition "${compDoc.name}" (${compDoc.shortName || compDoc.code})`
+      });
+    }
+
+    if (!awayMemberships.includes(leagueIdStr)) {
+      return res.status(400).json({
+        success: false,
+        message: `Away team "${awayDoc.name}" is not registered in competition "${compDoc.name}" (${compDoc.shortName || compDoc.code})`
+      });
+    }
+
     const match = await Match.create({
-      league,
-      homeTeam,
-      awayTeam,
+      league: compDoc._id,
+      homeTeam: homeDoc._id,
+      awayTeam: awayDoc._id,
       matchDate: new Date(matchDate),
-      venue: venue || '',
+      venue: venue || homeDoc.stadium || '',
       preview: preview || '',
       updatedBy: req.user._id
     });
 
     const populatedMatch = await Match.findById(match._id)
-      .populate('homeTeam', 'name shortName logo')
-      .populate('awayTeam', 'name shortName logo')
-      .populate('league', 'name season code');
+      .populate('homeTeam', 'name shortName code logo stadium city country')
+      .populate('awayTeam', 'name shortName code logo stadium city country')
+      .populate('league', 'name shortName season code type logo standingsEnabled isActive');
 
-    await auditService.logActivity({
-      userId: req.user._id,
-      action: 'CREATE_MATCH_FEATURE',
-      targetEntity: 'Match',
-      targetId: match._id,
-      details: {
-        home: populatedMatch.homeTeam?.name,
-        away: populatedMatch.awayTeam?.name,
-        matchDate
-      },
-      req
-    });
+    if (auditService && req.user) {
+      await auditService.logActivity({
+        userId: req.user._id,
+        action: 'CREATE_MATCH_FEATURE',
+        targetEntity: 'Match',
+        targetId: match._id,
+        details: {
+          home: homeDoc.name,
+          away: awayDoc.name,
+          competition: compDoc.name,
+          matchDate
+        },
+        req
+      });
+    }
 
     res.status(201).json({
       success: true,
-      message: 'Match feature created successfully',
+      message: 'Match fixture scheduled successfully',
       match: populatedMatch
     });
   } catch (error) {
@@ -133,7 +200,7 @@ const createMatch = async (req, res, next) => {
   }
 };
 
-// @desc    Update match feature details (preview, report, date, venue)
+// @desc    Update match feature details (preview, report, date, venue, teams, league)
 // @route   PUT /api/v1/matches/:id
 // @access  Private (Admin, Editor)
 const updateMatch = async (req, res, next) => {
@@ -150,9 +217,60 @@ const updateMatch = async (req, res, next) => {
 
     const { league, homeTeam, awayTeam, matchDate, venue, preview, report } = req.body;
 
-    if (league) match.league = league;
-    if (homeTeam) match.homeTeam = homeTeam;
-    if (awayTeam) match.awayTeam = awayTeam;
+    const targetLeagueId = (league || match.league).toString();
+    const targetHomeId = (homeTeam || match.homeTeam).toString();
+    const targetAwayId = (awayTeam || match.awayTeam).toString();
+
+    if (targetHomeId === targetAwayId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Home team and Away team cannot be the same'
+      });
+    }
+
+    // Validate competition
+    const compDoc = await League.findById(targetLeagueId);
+    if (!compDoc) {
+      return res.status(400).json({
+        success: false,
+        message: 'Selected competition does not exist'
+      });
+    }
+
+    // Validate teams and competition memberships
+    const [homeDoc, awayDoc] = await Promise.all([
+      Team.findById(targetHomeId),
+      Team.findById(targetAwayId)
+    ]);
+
+    if (!homeDoc || !awayDoc) {
+      return res.status(400).json({
+        success: false,
+        message: 'One or both selected teams do not exist'
+      });
+    }
+
+    const leagueIdStr = compDoc._id.toString();
+    const homeMemberships = (homeDoc.competitions || []).map((c) => (c?._id || c).toString());
+    const awayMemberships = (awayDoc.competitions || []).map((c) => (c?._id || c).toString());
+
+    if (!homeMemberships.includes(leagueIdStr)) {
+      return res.status(400).json({
+        success: false,
+        message: `Home team "${homeDoc.name}" is not registered in competition "${compDoc.name}"`
+      });
+    }
+
+    if (!awayMemberships.includes(leagueIdStr)) {
+      return res.status(400).json({
+        success: false,
+        message: `Away team "${awayDoc.name}" is not registered in competition "${compDoc.name}"`
+      });
+    }
+
+    match.league = compDoc._id;
+    match.homeTeam = homeDoc._id;
+    match.awayTeam = awayDoc._id;
     if (matchDate) match.matchDate = new Date(matchDate);
     if (venue !== undefined) match.venue = venue;
     if (preview !== undefined) match.preview = preview;
@@ -161,26 +279,33 @@ const updateMatch = async (req, res, next) => {
 
     await match.save();
 
-    await auditService.logActivity({
-      userId: req.user._id,
-      action: 'UPDATE_MATCH_FEATURE',
-      targetEntity: 'Match',
-      targetId: match._id,
-      details: { updatedByRole: req.user.role },
-      req
-    });
+    const populatedMatch = await Match.findById(match._id)
+      .populate('homeTeam', 'name shortName code logo stadium city country')
+      .populate('awayTeam', 'name shortName code logo stadium city country')
+      .populate('league', 'name shortName season code type logo standingsEnabled isActive');
+
+    if (auditService && req.user) {
+      await auditService.logActivity({
+        userId: req.user._id,
+        action: 'UPDATE_MATCH_FEATURE',
+        targetEntity: 'Match',
+        targetId: match._id,
+        details: { updatedByRole: req.user.role },
+        req
+      });
+    }
 
     res.status(200).json({
       success: true,
       message: 'Match details updated successfully',
-      match
+      match: populatedMatch
     });
   } catch (error) {
     next(error);
   }
 };
 
-// @desc    Update match current scoreline & status (AUTOMATIC TABLE RECALCULATION TRIGGER)
+// @desc    Update match scoreline & status
 // @route   PATCH /api/v1/matches/:id/scoreline
 // @access  Private (Admin, Editor)
 const updateScoreline = async (req, res, next) => {
@@ -220,30 +345,35 @@ const updateScoreline = async (req, res, next) => {
 
     let tableUpdated = false;
 
-    // Trigger full table recalculation whenever the match is currently FINISHED
-    // or was previously FINISHED (e.g. reverting to LIVE/UPCOMING also recalculates
-    // so that the old result is removed from standings).
-    if (match.status === 'FINISHED' || previousStatus === 'FINISHED') {
-      await tableService.recalculateTable(match.league);
-      tableUpdated = true;
+    // Check if competition has standingsEnabled: true
+    const compDoc = await League.findById(match.league);
+    if (compDoc && compDoc.standingsEnabled) {
+      if (match.status === 'FINISHED' || previousStatus === 'FINISHED') {
+        await tableService.recalculateTable(compDoc._id);
+        tableUpdated = true;
+      }
     }
 
     const populatedMatch = await Match.findById(match._id)
-      .populate('homeTeam', 'name shortName logo')
-      .populate('awayTeam', 'name shortName logo');
+      .populate('homeTeam', 'name shortName code logo')
+      .populate('awayTeam', 'name shortName code logo')
+      .populate('league', 'name shortName season code type logo standingsEnabled');
 
-    await auditService.logActivity({
-      userId: req.user._id,
-      action: 'UPDATE_SCORELINE',
-      targetEntity: 'Match',
-      targetId: match._id,
-      details: {
-        score: `${populatedMatch.homeTeam?.shortName} ${match.homeScore} - ${match.awayScore} ${populatedMatch.awayTeam?.shortName}`,
-        status: match.status,
-        tableAutoUpdated: tableUpdated
-      },
-      req
-    });
+    if (auditService && req.user) {
+      await auditService.logActivity({
+        userId: req.user._id,
+        action: 'UPDATE_SCORELINE',
+        targetEntity: 'Match',
+        targetId: match._id,
+        details: {
+          score: `${populatedMatch.homeTeam?.shortName} ${match.homeScore} - ${match.awayScore} ${populatedMatch.awayTeam?.shortName}`,
+          competition: compDoc?.name,
+          status: match.status,
+          tableAutoUpdated: tableUpdated
+        },
+        req
+      });
+    }
 
     res.status(200).json({
       success: true,
@@ -256,7 +386,7 @@ const updateScoreline = async (req, res, next) => {
   }
 };
 
-// @desc    Cancel a match fixture (sets status to CANCELLED, recalculates table)
+// @desc    Cancel a match fixture
 // @route   PATCH /api/v1/matches/:id/cancel
 // @access  Private (Admin, Editor)
 const cancelMatch = async (req, res, next) => {
@@ -276,25 +406,25 @@ const cancelMatch = async (req, res, next) => {
     match.updatedBy = req.user._id;
     await match.save();
 
-    // If the match was previously FINISHED, recalculate table to remove its result.
-    // If it was UPCOMING/LIVE/POSTPONED, standings are unaffected but we still call
-    // recalculate to be safe (it is a no-op for non-FINISHED matches).
-    if (previousStatus === 'FINISHED') {
-      await tableService.recalculateTable(match.league);
+    const compDoc = await League.findById(match.league);
+    if (compDoc && compDoc.standingsEnabled && previousStatus === 'FINISHED') {
+      await tableService.recalculateTable(compDoc._id);
     }
 
-    await auditService.logActivity({
-      userId: req.user._id,
-      action: 'CANCEL_MATCH',
-      targetEntity: 'Match',
-      targetId: match._id,
-      details: { previousStatus },
-      req
-    });
+    if (auditService && req.user) {
+      await auditService.logActivity({
+        userId: req.user._id,
+        action: 'CANCEL_MATCH',
+        targetEntity: 'Match',
+        targetId: match._id,
+        details: { previousStatus },
+        req
+      });
+    }
 
     res.status(200).json({
       success: true,
-      message: 'Match cancelled successfully. League table updated.',
+      message: 'Match cancelled successfully',
       match
     });
   } catch (error) {
@@ -334,7 +464,6 @@ const addMatchEvent = async (req, res, next) => {
       detail: detail || ''
     });
 
-    // Auto increment score if event is a goal and autoIncrementScore is true
     if (type === 'GOAL' && autoIncrementScore) {
       if (team.toString() === match.homeTeam.toString()) {
         match.homeScore += 1;
@@ -346,19 +475,21 @@ const addMatchEvent = async (req, res, next) => {
     match.updatedBy = req.user._id;
     await match.save();
 
-    // Trigger table update if match is already FINISHED
-    if (match.status === 'FINISHED') {
-      await tableService.recalculateTable(match.league);
+    const compDoc = await League.findById(match.league);
+    if (compDoc && compDoc.standingsEnabled && match.status === 'FINISHED') {
+      await tableService.recalculateTable(compDoc._id);
     }
 
-    await auditService.logActivity({
-      userId: req.user._id,
-      action: 'ADD_MATCH_EVENT',
-      targetEntity: 'Match',
-      targetId: match._id,
-      details: { eventType: type, player, minute },
-      req
-    });
+    if (auditService && req.user) {
+      await auditService.logActivity({
+        userId: req.user._id,
+        action: 'ADD_MATCH_EVENT',
+        targetEntity: 'Match',
+        targetId: match._id,
+        details: { eventType: type, player, minute },
+        req
+      });
+    }
 
     res.status(200).json({
       success: true,
@@ -388,21 +519,24 @@ const deleteMatch = async (req, res, next) => {
     const leagueId = match.league;
     await Match.findByIdAndDelete(id);
 
-    // Recalculate table after match deletion — if it was FINISHED its stats
-    // are automatically removed since we rebuild from scratch.
-    await tableService.recalculateTable(leagueId);
+    const compDoc = await League.findById(leagueId);
+    if (compDoc && compDoc.standingsEnabled) {
+      await tableService.recalculateTable(leagueId);
+    }
 
-    await auditService.logActivity({
-      userId: req.user._id,
-      action: 'DELETE_MATCH',
-      targetEntity: 'Match',
-      targetId: id,
-      req
-    });
+    if (auditService && req.user) {
+      await auditService.logActivity({
+        userId: req.user._id,
+        action: 'DELETE_MATCH',
+        targetEntity: 'Match',
+        targetId: id,
+        req
+      });
+    }
 
     res.status(200).json({
       success: true,
-      message: 'Match deleted successfully and league table updated'
+      message: 'Match deleted successfully'
     });
   } catch (error) {
     next(error);

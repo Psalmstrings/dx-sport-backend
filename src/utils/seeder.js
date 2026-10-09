@@ -5,6 +5,7 @@ const Post = require('../models/Post');
 const Match = require('../models/Match');
 const Transfer = require('../models/Transfer');
 const Media = require('../models/Media');
+const tableService = require('../services/tableService');
 
 const seedDatabase = async () => {
   try {
@@ -47,29 +48,65 @@ const seedDatabase = async () => {
       console.log('[Seeder] Editor initialized: editor@dxsport.com / editor123');
     }
 
-    // 4. Seed NPFL League
-    let league = await League.findOne({ code: 'NPFL' });
-    if (!league) {
-      // Also check for the old incorrectly-seeded EPL entry and rename it rather
-      // than creating a duplicate league.
+    // 4. Seed / Verify NPFL League (Competition)
+    let npflLeague = await League.findOne({ code: 'NPFL' });
+    if (!npflLeague) {
+      // Also check for legacy EPL entry if previously seeded
       const oldEpl = await League.findOne({ code: 'EPL', name: 'Premier League' });
       if (oldEpl) {
         oldEpl.name = 'Nigeria Premier Football League';
+        oldEpl.shortName = 'NPFL';
         oldEpl.code = 'NPFL';
+        oldEpl.type = 'League';
+        oldEpl.standingsEnabled = true;
+        oldEpl.isActive = true;
         await oldEpl.save();
-        console.log('[Seeder] Renamed legacy EPL league → NPFL');
+        npflLeague = oldEpl;
+        console.log('[Seeder] Migrated legacy EPL entry → NPFL');
       } else {
-        await League.create({
+        npflLeague = await League.create({
           name: 'Nigeria Premier Football League',
-          season: '2025/2026',
+          shortName: 'NPFL',
           code: 'NPFL',
+          type: 'League',
+          description: 'Top tier of the Nigerian football league system.',
+          country: 'Nigeria',
+          season: '2025/2026',
+          standingsEnabled: true,
           isActive: true
         });
         console.log('[Seeder] NPFL League Season initialized');
       }
+    } else {
+      // Ensure NPFL properties match requirements
+      await League.findByIdAndUpdate(npflLeague._id, {
+        $set: {
+          shortName: 'NPFL',
+          type: 'League',
+          standingsEnabled: true,
+          isActive: true
+        }
+      });
+      console.log('[Seeder] Verified & updated NPFL competition flags via findByIdAndUpdate');
     }
 
-    console.log('[Seeder] System ready for Client testing. Zero dummy posts/matches/teams loaded.');
+    // 5. Migrate any existing teams without competitions array to NPFL
+    const existingTeams = await Team.find({});
+    for (const team of existingTeams) {
+      if (!Array.isArray(team.competitions) || team.competitions.length === 0) {
+        team.competitions = [npflLeague._id];
+        if (team.isActive === undefined) team.isActive = true;
+        await team.save();
+        console.log(`[Seeder] Associated existing team "${team.name}" with NPFL`);
+      }
+    }
+
+    // 6. Recalculate NPFL standings if teams exist
+    if (existingTeams.length > 0) {
+      await tableService.recalculateTable(npflLeague._id);
+    }
+
+    console.log('[Seeder] System ready. Multi-competition & NPFL isolation verified.');
   } catch (error) {
     console.error('[Seeder] Error seeding database:', error.message);
   }

@@ -2,33 +2,56 @@ const tableService = require('../services/tableService');
 const League = require('../models/League');
 const auditService = require('../services/auditService');
 
-// @desc    Get automated league table standings
+// @desc    Get automated league table standings (defaults exclusively to NPFL)
+// @route   GET /api/v1/table
 // @route   GET /api/v1/table/:leagueId
 // @access  Public
 const getStandings = async (req, res, next) => {
   try {
     let { leagueId } = req.params;
 
-    // If leagueId is default or 'current', fetch active league
+    let targetLeague = null;
+
+    // Default / public table is strictly NPFL
     if (!leagueId || leagueId === 'current') {
-      const activeLeague = await League.findOne({ isActive: true });
-      if (!activeLeague) {
+      targetLeague = await tableService.getNpflLeague();
+      if (!targetLeague) {
         return res.status(404).json({
           success: false,
-          message: 'No active league found'
+          message: 'NPFL competition not found'
         });
       }
-      leagueId = activeLeague._id;
+      leagueId = targetLeague._id;
+    } else {
+      targetLeague = await League.findById(leagueId);
+      if (!targetLeague) {
+        return res.status(404).json({
+          success: false,
+          message: 'Competition not found'
+        });
+      }
+    }
+
+    // If standings are not enabled for this competition, return empty set
+    if (!targetLeague.standingsEnabled) {
+      return res.status(200).json({
+        success: true,
+        league: targetLeague,
+        count: 0,
+        standings: [],
+        table: [],
+        message: 'Standings are not enabled for this competition'
+      });
     }
 
     const standings = await tableService.getStandings(leagueId);
-    const league = await League.findById(leagueId);
 
     res.status(200).json({
       success: true,
-      league,
+      league: targetLeague,
       count: standings.length,
-      standings
+      standings,
+      table: standings
     });
   } catch (error) {
     next(error);
@@ -40,31 +63,40 @@ const getStandings = async (req, res, next) => {
 // @access  Private (Admin, Editor)
 const recalculateStandings = async (req, res, next) => {
   try {
-    const { leagueId } = req.params;
+    let { leagueId } = req.params;
+
+    if (!leagueId || leagueId === 'current') {
+      const npfl = await tableService.getNpflLeague();
+      if (!npfl) return res.status(404).json({ success: false, message: 'NPFL league not found' });
+      leagueId = npfl._id;
+    }
 
     const league = await League.findById(leagueId);
     if (!league) {
       return res.status(404).json({
         success: false,
-        message: 'League not found'
+        message: 'Competition not found'
       });
     }
 
     const standings = await tableService.recalculateTable(leagueId);
 
-    await auditService.logActivity({
-      userId: req.user._id,
-      action: 'RECALCULATE_LEAGUE_TABLE',
-      targetEntity: 'League',
-      targetId: leagueId,
-      req
-    });
+    if (auditService && req.user) {
+      await auditService.logActivity({
+        userId: req.user._id,
+        action: 'RECALCULATE_LEAGUE_TABLE',
+        targetEntity: 'League',
+        targetId: leagueId,
+        req
+      });
+    }
 
     res.status(200).json({
       success: true,
-      message: 'League table standings recalculated successfully',
+      message: `Table standings for "${league.name}" recalculated successfully`,
       league,
-      standings
+      standings,
+      table: standings
     });
   } catch (error) {
     next(error);

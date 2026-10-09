@@ -50,7 +50,22 @@ class MemoryCollection {
       } else if (val && typeof val === 'object' && !Array.isArray(val)) {
         if (val.$gte !== undefined && docVal < val.$gte) return false;
         if (val.$lte !== undefined && docVal > val.$lte) return false;
-        if (val.$ne !== undefined && docVal === val.$ne) return false;
+        if (val.$ne !== undefined && docVal?.toString() === val.$ne?.toString()) return false;
+        if (val.$nin !== undefined && Array.isArray(val.$nin)) {
+          if (val.$nin.map((x) => x?.toString()).includes(docVal?.toString())) return false;
+        }
+        if (val.$in !== undefined && Array.isArray(val.$in)) {
+          const inStrs = val.$in.map((x) => x?.toString());
+          if (Array.isArray(docVal)) {
+            if (!docVal.some((item) => inStrs.includes(item?.toString()))) return false;
+          } else {
+            if (!inStrs.includes(docVal?.toString())) return false;
+          }
+        }
+      } else if (Array.isArray(docVal)) {
+        // Checking if docVal array contains val
+        const valStr = val?.toString();
+        if (!docVal.some((item) => item?.toString() === valStr)) return false;
       } else if (docVal !== undefined) {
         if (docVal?.toString() !== val?.toString()) return false;
       } else {
@@ -122,11 +137,44 @@ class MemoryCollection {
     return doc;
   }
 
+  _applyUpdate(doc, updateData) {
+    if (!updateData || typeof updateData !== 'object') return doc;
+
+    if (updateData.$set) {
+      Object.assign(doc, updateData.$set);
+    }
+    if (updateData.$addToSet) {
+      for (const [field, val] of Object.entries(updateData.$addToSet)) {
+        if (!Array.isArray(doc[field])) doc[field] = [];
+        const valStr = val?.toString();
+        if (!doc[field].some((item) => item?.toString() === valStr)) {
+          doc[field].push(val);
+        }
+      }
+    }
+    if (updateData.$pull) {
+      for (const [field, val] of Object.entries(updateData.$pull)) {
+        if (Array.isArray(doc[field])) {
+          const valStr = val?.toString();
+          doc[field] = doc[field].filter((item) => item?.toString() !== valStr);
+        }
+      }
+    }
+
+    // Direct keys without operator prefix
+    const plainKeys = Object.keys(updateData).filter((k) => !k.startsWith('$'));
+    for (const key of plainKeys) {
+      doc[key] = updateData[key];
+    }
+
+    doc.updatedAt = new Date();
+    return doc;
+  }
+
   async findByIdAndUpdate(id, updateData, options = {}) {
     const doc = await this.findById(id);
     if (!doc) return null;
-    Object.assign(doc, updateData);
-    doc.updatedAt = new Date();
+    this._applyUpdate(doc, updateData);
     this.documents.set(id.toString(), doc);
     return doc;
   }
@@ -134,12 +182,13 @@ class MemoryCollection {
   async findOneAndUpdate(query, updateData, options = {}) {
     let doc = await this.findOne(query);
     if (!doc && options.upsert) {
-      doc = await this.create({ ...query, ...updateData });
+      const initial = { ...query };
+      this._applyUpdate(initial, updateData);
+      doc = await this.create(initial);
       return doc;
     }
     if (doc) {
-      Object.assign(doc, updateData);
-      doc.updatedAt = new Date();
+      this._applyUpdate(doc, updateData);
       this.documents.set(doc._id.toString(), doc);
     }
     return doc;
@@ -150,6 +199,16 @@ class MemoryCollection {
     const doc = this.documents.get(id.toString());
     this.documents.delete(id.toString());
     return doc;
+  }
+
+  async deleteMany(query = {}) {
+    const list = await this.find(query);
+    for (const doc of list) {
+      if (doc && doc._id) {
+        this.documents.delete(doc._id.toString());
+      }
+    }
+    return { acknowledged: true, deletedCount: list.length };
   }
 
   async countDocuments(query = {}) {
