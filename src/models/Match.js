@@ -13,6 +13,17 @@ const matchEventSchema = new mongoose.Schema(
   { _id: true, timestamps: true }
 );
 
+const normalizeStatus = (status) => {
+  if (!status) return 'UPCOMING';
+  const s = String(status).trim().toUpperCase();
+  if (['FINISHED', 'COMPLETED', 'FT', 'FULL TIME', 'FULLTIME'].includes(s)) return 'FINISHED';
+  if (['UPCOMING', 'SCHEDULED', 'NOT_STARTED'].includes(s)) return 'UPCOMING';
+  if (['LIVE', 'IN_PROGRESS', 'IN PROGRESS'].includes(s)) return 'LIVE';
+  if (['POSTPONED'].includes(s)) return 'POSTPONED';
+  if (['CANCELLED', 'CANCELED'].includes(s)) return 'CANCELLED';
+  return s;
+};
+
 const matchSchema = new mongoose.Schema(
   {
     league: { type: mongoose.Schema.Types.ObjectId, ref: 'League', required: true },
@@ -20,7 +31,12 @@ const matchSchema = new mongoose.Schema(
     awayTeam: { type: mongoose.Schema.Types.ObjectId, ref: 'Team', required: true },
     matchDate: { type: Date, required: true },
     venue: { type: String, default: '' },
-    status: { type: String, enum: ['UPCOMING', 'LIVE', 'FINISHED', 'POSTPONED', 'CANCELLED'], default: 'UPCOMING' },
+    status: {
+      type: String,
+      set: normalizeStatus,
+      enum: ['UPCOMING', 'LIVE', 'FINISHED', 'COMPLETED', 'POSTPONED', 'CANCELLED'],
+      default: 'UPCOMING'
+    },
     homeScore: { type: Number, default: 0 },
     awayScore: { type: Number, default: 0 },
     halfTimeHomeScore: { type: Number, default: 0 },

@@ -10,7 +10,13 @@ class TableService {
   async getNpflLeague() {
     let npfl = await League.findOne({ code: 'NPFL' });
     if (!npfl) {
+      npfl = await League.findOne({ shortName: 'NPFL' });
+    }
+    if (!npfl) {
       npfl = await League.findOne({ name: 'Nigeria Premier Football League' });
+    }
+    if (!npfl) {
+      npfl = await League.findOne({ name: /Nigeria Premier Football League/i });
     }
     return npfl;
   }
@@ -19,7 +25,7 @@ class TableService {
    * Automatically recalculates the league table for a given competition.
    *
    * CRITICAL ISOLATION RULES:
-   * 1. Only processes competitions that have standingsEnabled: true.
+   * 1. Only processes competitions that have standingsEnabled: true (or NPFL).
    * 2. Scopes team membership strictly to teams assigned to this competition.
    * 3. Scopes match calculation strictly to finished matches for this competition.
    * 4. Completely isolates NPFL from NNL, CAF, EPL, or other competitions.
@@ -27,8 +33,12 @@ class TableService {
   async recalculateTable(leagueId) {
     if (!leagueId) return [];
 
-    const actualLeagueId = (leagueId?._id || leagueId || '').toString();
-    if (!actualLeagueId) return [];
+    let actualLeagueId = (leagueId?._id || leagueId || '').toString();
+    if (!actualLeagueId || actualLeagueId === 'current') {
+      const npfl = await this.getNpflLeague();
+      if (!npfl) return [];
+      actualLeagueId = npfl._id.toString();
+    }
 
     const targetLeague = await League.findById(actualLeagueId);
     if (!targetLeague) {
@@ -36,10 +46,19 @@ class TableService {
       return [];
     }
 
-    // Only compute standings if standingsEnabled is explicitly true for this competition
-    if (!targetLeague.standingsEnabled) {
+    const isNpfl = targetLeague.code === 'NPFL' ||
+      targetLeague.shortName === 'NPFL' ||
+      (targetLeague.name && /nigeria premier/i.test(targetLeague.name));
+
+    // Only compute standings if standingsEnabled is explicitly true for this competition OR it's NPFL
+    if (!targetLeague.standingsEnabled && !isNpfl) {
       console.log(`[TableService] Standings not enabled for competition "${targetLeague.name}" (${targetLeague.code}). Skipping.`);
       return [];
+    }
+
+    if (isNpfl && !targetLeague.standingsEnabled) {
+      targetLeague.standingsEnabled = true;
+      await targetLeague.save();
     }
 
     // ---------------------------------------------------------
@@ -47,7 +66,7 @@ class TableService {
     // ---------------------------------------------------------
     const eligibleTeams = await Team.find({
       competitions: targetLeague._id,
-      isActive: true
+      isActive: { $ne: false }
     });
 
     // ---------------------------------------------------------
@@ -82,7 +101,7 @@ class TableService {
     // ---------------------------------------------------------
     const finishedMatches = await Match.find({
       league: targetLeague._id,
-      status: 'FINISHED'
+      status: { $in: ['FINISHED', 'COMPLETED'] }
     }).sort({
       matchDate: 1
     });
@@ -197,7 +216,7 @@ class TableService {
         },
         {
           upsert: true,
-          new: true
+          returnDocument: 'after'
         }
       );
     });

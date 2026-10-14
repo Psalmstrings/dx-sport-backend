@@ -4,6 +4,17 @@ const Team = require('../models/Team');
 const tableService = require('../services/tableService');
 const auditService = require('../services/auditService');
 
+const normalizeStatus = (status) => {
+  if (!status) return 'UPCOMING';
+  const s = String(status).trim().toUpperCase();
+  if (['FINISHED', 'COMPLETED', 'FT', 'FULL TIME', 'FULLTIME'].includes(s)) return 'FINISHED';
+  if (['UPCOMING', 'SCHEDULED', 'NOT_STARTED'].includes(s)) return 'UPCOMING';
+  if (['LIVE', 'IN_PROGRESS', 'IN PROGRESS'].includes(s)) return 'LIVE';
+  if (['POSTPONED'].includes(s)) return 'POSTPONED';
+  if (['CANCELLED', 'CANCELED'].includes(s)) return 'CANCELLED';
+  return s;
+};
+
 // @desc    Get matches (Public filterable listing)
 // @route   GET /api/v1/matches
 // @access  Public
@@ -81,7 +92,7 @@ const getMatchById = async (req, res, next) => {
 // @access  Private (Admin, Editor)
 const createMatch = async (req, res, next) => {
   try {
-    const { league, homeTeam, awayTeam, matchDate, venue, preview } = req.body;
+    const { league, homeTeam, awayTeam, matchDate, venue, preview, status, homeScore, awayScore } = req.body;
 
     if (!league || !homeTeam || !awayTeam || !matchDate) {
       return res.status(400).json({
@@ -159,6 +170,8 @@ const createMatch = async (req, res, next) => {
       });
     }
 
+    const initialStatus = normalizeStatus(status || 'UPCOMING');
+
     const match = await Match.create({
       league: compDoc._id,
       homeTeam: homeDoc._id,
@@ -166,8 +179,15 @@ const createMatch = async (req, res, next) => {
       matchDate: new Date(matchDate),
       venue: venue || homeDoc.stadium || '',
       preview: preview || '',
+      status: initialStatus,
+      homeScore: homeScore !== undefined ? Number(homeScore) : 0,
+      awayScore: awayScore !== undefined ? Number(awayScore) : 0,
       updatedBy: req.user._id
     });
+
+    if (initialStatus === 'FINISHED' && (compDoc.standingsEnabled || compDoc.code === 'NPFL' || compDoc.shortName === 'NPFL')) {
+      await tableService.recalculateTable(compDoc._id);
+    }
 
     const populatedMatch = await Match.findById(match._id)
       .populate('homeTeam', 'name shortName code logo stadium city country')
@@ -215,11 +235,26 @@ const updateMatch = async (req, res, next) => {
       });
     }
 
-    const { league, homeTeam, awayTeam, matchDate, venue, preview, report } = req.body;
+    const previousLeagueId = (match.league?._id || match.league || '').toString();
+    const previousStatus = match.status;
 
-    const targetLeagueId = (league || match.league).toString();
-    const targetHomeId = (homeTeam || match.homeTeam).toString();
-    const targetAwayId = (awayTeam || match.awayTeam).toString();
+    const {
+      league,
+      homeTeam,
+      awayTeam,
+      matchDate,
+      venue,
+      preview,
+      report,
+      homeScore,
+      awayScore,
+      status,
+      currentMinute
+    } = req.body;
+
+    const targetLeagueId = (league || match.league?._id || match.league).toString();
+    const targetHomeId = (homeTeam || match.homeTeam?._id || match.homeTeam).toString();
+    const targetAwayId = (awayTeam || match.awayTeam?._id || match.awayTeam).toString();
 
     if (targetHomeId === targetAwayId) {
       return res.status(400).json({
@@ -275,9 +310,39 @@ const updateMatch = async (req, res, next) => {
     if (venue !== undefined) match.venue = venue;
     if (preview !== undefined) match.preview = preview;
     if (report !== undefined) match.report = report;
+    if (homeScore !== undefined && homeScore !== null && homeScore !== '') match.homeScore = Number(homeScore);
+    if (awayScore !== undefined && awayScore !== null && awayScore !== '') match.awayScore = Number(awayScore);
+    if (status !== undefined) match.status = normalizeStatus(status);
+    if (currentMinute !== undefined) {
+      const parsedMin = typeof currentMinute === 'string'
+        ? parseInt(currentMinute.replace(/\D/g, ''), 10)
+        : Number(currentMinute);
+      match.currentMinute = isNaN(parsedMin) ? 0 : parsedMin;
+    }
     match.updatedBy = req.user._id;
 
     await match.save();
+
+    let tableUpdated = false;
+    let freshStandings = [];
+
+    const isCurrentNpfl = compDoc.code === 'NPFL' ||
+      compDoc.shortName === 'NPFL' ||
+      (compDoc.name && /nigeria premier/i.test(compDoc.name));
+
+    if (compDoc.standingsEnabled || isCurrentNpfl) {
+      if (match.status === 'FINISHED' || previousStatus === 'FINISHED') {
+        freshStandings = await tableService.recalculateTable(compDoc._id);
+        tableUpdated = true;
+      }
+    }
+
+    if (previousLeagueId && previousLeagueId !== compDoc._id.toString()) {
+      const prevComp = await League.findById(previousLeagueId);
+      if (prevComp && (prevComp.standingsEnabled || prevComp.code === 'NPFL')) {
+        await tableService.recalculateTable(prevComp._id);
+      }
+    }
 
     const populatedMatch = await Match.findById(match._id)
       .populate('homeTeam', 'name shortName code logo stadium city country')
@@ -297,8 +362,10 @@ const updateMatch = async (req, res, next) => {
 
     res.status(200).json({
       success: true,
-      message: 'Match details updated successfully',
-      match: populatedMatch
+      message: `Match details updated successfully.${tableUpdated ? ' League table automatically updated!' : ''}`,
+      tableAutoUpdated: tableUpdated,
+      match: populatedMatch,
+      standings: freshStandings
     });
   } catch (error) {
     next(error);
@@ -332,24 +399,47 @@ const updateScoreline = async (req, res, next) => {
 
     const previousStatus = match.status;
 
-    if (homeScore !== undefined) match.homeScore = Number(homeScore);
-    if (awayScore !== undefined) match.awayScore = Number(awayScore);
-    if (status !== undefined) match.status = status;
-    if (currentMinute !== undefined) match.currentMinute = Number(currentMinute);
-    if (halfTimeHomeScore !== undefined) match.halfTimeHomeScore = Number(halfTimeHomeScore);
-    if (halfTimeAwayScore !== undefined) match.halfTimeAwayScore = Number(halfTimeAwayScore);
+    if (homeScore !== undefined && homeScore !== null && homeScore !== '') {
+      match.homeScore = Number(homeScore);
+    }
+    if (awayScore !== undefined && awayScore !== null && awayScore !== '') {
+      match.awayScore = Number(awayScore);
+    }
+    if (status !== undefined) {
+      match.status = normalizeStatus(status);
+    }
+    if (currentMinute !== undefined) {
+      const parsedMin = typeof currentMinute === 'string'
+        ? parseInt(currentMinute.replace(/\D/g, ''), 10)
+        : Number(currentMinute);
+      match.currentMinute = isNaN(parsedMin) ? 0 : parsedMin;
+    }
+    if (halfTimeHomeScore !== undefined && halfTimeHomeScore !== null && halfTimeHomeScore !== '') {
+      match.halfTimeHomeScore = Number(halfTimeHomeScore);
+    }
+    if (halfTimeAwayScore !== undefined && halfTimeAwayScore !== null && halfTimeAwayScore !== '') {
+      match.halfTimeAwayScore = Number(halfTimeAwayScore);
+    }
     if (report !== undefined) match.report = report;
 
     match.updatedBy = req.user._id;
     await match.save();
 
     let tableUpdated = false;
+    let freshStandings = [];
 
-    // Check if competition has standingsEnabled: true
-    const compDoc = await League.findById(match.league);
-    if (compDoc && compDoc.standingsEnabled) {
+    // Check if competition has standingsEnabled: true OR is NPFL
+    const leagueId = (match.league?._id || match.league || '').toString();
+    const compDoc = await League.findById(leagueId);
+    const isNpfl = compDoc && (
+      compDoc.code === 'NPFL' ||
+      compDoc.shortName === 'NPFL' ||
+      (compDoc.name && /nigeria premier/i.test(compDoc.name))
+    );
+
+    if (compDoc && (compDoc.standingsEnabled || isNpfl)) {
       if (match.status === 'FINISHED' || previousStatus === 'FINISHED') {
-        await tableService.recalculateTable(compDoc._id);
+        freshStandings = await tableService.recalculateTable(compDoc._id);
         tableUpdated = true;
       }
     }
@@ -379,7 +469,8 @@ const updateScoreline = async (req, res, next) => {
       success: true,
       message: `Scoreline updated successfully.${tableUpdated ? ' League table automatically updated!' : ''}`,
       tableAutoUpdated: tableUpdated,
-      match: populatedMatch
+      match: populatedMatch,
+      standings: freshStandings
     });
   } catch (error) {
     next(error);

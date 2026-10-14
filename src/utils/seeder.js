@@ -5,6 +5,7 @@ const Post = require('../models/Post');
 const Match = require('../models/Match');
 const Transfer = require('../models/Transfer');
 const Media = require('../models/Media');
+const Standings = require('../models/Standings');
 const tableService = require('../services/tableService');
 
 const seedDatabase = async () => {
@@ -51,46 +52,80 @@ const seedDatabase = async () => {
     // 4. Seed / Verify NPFL League (Competition)
     let npflLeague = await League.findOne({ code: 'NPFL' });
     if (!npflLeague) {
-      // Also check for legacy EPL entry if previously seeded
-      const oldEpl = await League.findOne({ code: 'EPL', name: 'Premier League' });
-      if (oldEpl) {
-        oldEpl.name = 'Nigeria Premier Football League';
-        oldEpl.shortName = 'NPFL';
-        oldEpl.code = 'NPFL';
-        oldEpl.type = 'League';
-        oldEpl.standingsEnabled = true;
-        oldEpl.isActive = true;
-        await oldEpl.save();
-        npflLeague = oldEpl;
-        console.log('[Seeder] Migrated legacy EPL entry → NPFL');
-      } else {
-        npflLeague = await League.create({
-          name: 'Nigeria Premier Football League',
-          shortName: 'NPFL',
-          code: 'NPFL',
-          type: 'League',
-          description: 'Top tier of the Nigerian football league system.',
-          country: 'Nigeria',
-          season: '2025/2026',
-          standingsEnabled: true,
-          isActive: true
-        });
-        console.log('[Seeder] NPFL League Season initialized');
-      }
-    } else {
-      // Ensure NPFL properties match requirements
-      await League.findByIdAndUpdate(npflLeague._id, {
-        $set: {
-          shortName: 'NPFL',
-          type: 'League',
-          standingsEnabled: true,
-          isActive: true
-        }
-      });
-      console.log('[Seeder] Verified & updated NPFL competition flags via findByIdAndUpdate');
+      npflLeague = await League.findOne({ shortName: 'NPFL' });
+    }
+    if (!npflLeague) {
+      npflLeague = await League.findOne({ name: 'Nigeria Premier Football League' });
     }
 
-    // 5. Migrate any existing teams without competitions array to NPFL
+    if (!npflLeague) {
+      npflLeague = await League.create({
+        name: 'Nigeria Premier Football League',
+        shortName: 'NPFL',
+        code: 'NPFL',
+        type: 'League',
+        description: 'Top tier of the Nigerian football league system.',
+        country: 'Nigeria',
+        season: '2025/2026',
+        standingsEnabled: true,
+        isActive: true
+      });
+      console.log('[Seeder] NPFL League Season initialized');
+    } else {
+      npflLeague.name = 'Nigeria Premier Football League';
+      npflLeague.shortName = 'NPFL';
+      npflLeague.code = 'NPFL';
+      npflLeague.type = 'League';
+      npflLeague.country = 'Nigeria';
+      npflLeague.standingsEnabled = true;
+      npflLeague.isActive = true;
+      await npflLeague.save();
+      console.log('[Seeder] Verified & updated NPFL competition flags');
+    }
+
+    // 5. Verify English Premier League (EPL) record if present
+    const eplLeague = await League.findOne({
+      $or: [
+        { code: 'EPL' },
+        { name: 'English Premier League' },
+        { name: 'Premier League', _id: { $ne: npflLeague._id } }
+      ]
+    });
+
+    if (eplLeague && eplLeague._id.toString() !== npflLeague._id.toString()) {
+      eplLeague.name = 'English Premier League';
+      eplLeague.shortName = 'EPL';
+      eplLeague.code = 'EPL';
+      eplLeague.country = 'England';
+      eplLeague.type = 'League';
+      eplLeague.standingsEnabled = false;
+      await eplLeague.save();
+      console.log('[Seeder] Verified English Premier League (EPL) competition record');
+
+      // Safe Migration: Move any matches involving NPFL clubs from EPL to NPFL
+      const npflTeams = await Team.find({ competitions: npflLeague._id });
+      const npflTeamIds = new Set(npflTeams.map((t) => t._id.toString()));
+
+      const misassignedMatches = await Match.find({ league: eplLeague._id });
+      let migratedCount = 0;
+      for (const m of misassignedMatches) {
+        const homeId = (m.homeTeam?._id || m.homeTeam || '').toString();
+        const awayId = (m.awayTeam?._id || m.awayTeam || '').toString();
+        if (npflTeamIds.has(homeId) || npflTeamIds.has(awayId)) {
+          m.league = npflLeague._id;
+          await m.save();
+          migratedCount++;
+        }
+      }
+      if (migratedCount > 0) {
+        console.log(`[Seeder] Migrated ${migratedCount} misassigned Nigerian matches from EPL to NPFL`);
+      }
+
+      // Purge orphaned standings for EPL
+      await Standings.deleteMany({ league: eplLeague._id });
+    }
+
+    // 6. Migrate any existing teams without competitions array to NPFL
     const existingTeams = await Team.find({});
     for (const team of existingTeams) {
       if (!Array.isArray(team.competitions) || team.competitions.length === 0) {
@@ -101,7 +136,7 @@ const seedDatabase = async () => {
       }
     }
 
-    // 6. Recalculate NPFL standings if teams exist
+    // 7. Recalculate NPFL standings if teams exist
     if (existingTeams.length > 0) {
       await tableService.recalculateTable(npflLeague._id);
     }

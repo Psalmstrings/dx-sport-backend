@@ -42,6 +42,14 @@ const getLeagues = async (req, res, next) => {
       })
     );
 
+    augmentedLeagues.sort((a, b) => {
+      const aIsNpfl = a.code === 'NPFL' || a.shortName === 'NPFL' || (a.name && /nigeria premier/i.test(a.name));
+      const bIsNpfl = b.code === 'NPFL' || b.shortName === 'NPFL' || (b.name && /nigeria premier/i.test(b.name));
+      if (aIsNpfl && !bIsNpfl) return -1;
+      if (!aIsNpfl && bIsNpfl) return 1;
+      return 0;
+    });
+
     res.status(200).json({
       success: true,
       count: augmentedLeagues.length,

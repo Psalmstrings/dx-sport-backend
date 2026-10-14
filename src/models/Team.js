@@ -17,7 +17,6 @@ const teamSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-teamSchema.index({ name: 1 }, { unique: true });
 
 const MongooseTeam = mongoose.model('Team', teamSchema);
 const memoryTeamColl = memoryStore.getCollection('teams');

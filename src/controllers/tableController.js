@@ -32,8 +32,17 @@ const getStandings = async (req, res, next) => {
       }
     }
 
-    // If standings are not enabled for this competition, return empty set
-    if (!targetLeague.standingsEnabled) {
+    // Set anti-caching headers so clients/proxies always receive the fresh table
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+
+    const isNpfl = targetLeague.code === 'NPFL' ||
+      targetLeague.shortName === 'NPFL' ||
+      (targetLeague.name && /nigeria premier/i.test(targetLeague.name));
+
+    // If standings are not enabled for this competition (and not NPFL), return empty set
+    if (!targetLeague.standingsEnabled && !isNpfl) {
       return res.status(200).json({
         success: true,
         league: targetLeague,
@@ -44,7 +53,12 @@ const getStandings = async (req, res, next) => {
       });
     }
 
-    const standings = await tableService.getStandings(leagueId);
+    let standings = await tableService.getStandings(leagueId);
+
+    // If standings table is currently empty for an enabled competition, calculate it now
+    if (standings.length === 0 && (targetLeague.standingsEnabled || isNpfl)) {
+      standings = await tableService.recalculateTable(leagueId);
+    }
 
     res.status(200).json({
       success: true,
