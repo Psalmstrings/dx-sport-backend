@@ -21,6 +21,7 @@ const teamRoutes = require('./src/routes/teamRoutes');
 const leagueRoutes = require('./src/routes/leagueRoutes');
 const transferRoutes = require('./src/routes/transferRoutes');
 const metaRoutes = require('./src/routes/metaRoutes');
+const analyticsRoutes = require('./src/routes/analyticsRoutes');
 
 const app = express();
 
@@ -59,6 +60,7 @@ app.use('/api/v1/table', tableRoutes);
 app.use('/api/v1/teams', teamRoutes);
 app.use('/api/v1/leagues', leagueRoutes);
 app.use('/api/v1/transfers', transferRoutes);
+app.use('/api/v1/analytics', analyticsRoutes);
 
 // ── Social Media Meta Route ──────────────────────────────────────────────────
 // MUST be mounted BEFORE the SPA catch-all so that social crawlers requesting

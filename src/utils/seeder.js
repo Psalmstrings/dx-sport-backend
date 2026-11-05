@@ -7,6 +7,7 @@ const Transfer = require('../models/Transfer');
 const Media = require('../models/Media');
 const Standings = require('../models/Standings');
 const tableService = require('../services/tableService');
+const analyticsService = require('../services/analyticsService');
 
 const seedDatabase = async () => {
   try {
@@ -140,6 +141,9 @@ const seedDatabase = async () => {
     if (existingTeams.length > 0) {
       await tableService.recalculateTable(npflLeague._id);
     }
+
+    // 8. Seed baseline visitor analytics data if empty
+    await analyticsService.seedRealisticData(false);
 
     console.log('[Seeder] System ready. Multi-competition & NPFL isolation verified.');
   } catch (error) {
