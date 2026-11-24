@@ -3,49 +3,120 @@
 const express = require('express');
 const router = express.Router();
 const Post = require('../models/Post');
-const { generateMetaHtml } = require('../utils/metaGenerator');
+const Match = require('../models/Match');
+const Standings = require('../models/Standings');
+const League = require('../models/League');
+const {
+  generateMetaHtml,
+  generateFixtureMetaHtml,
+  generateFixturesCenterMetaHtml,
+  generateTableMetaHtml
+} = require('../utils/metaGenerator');
 
 /**
  * GET /news/:slug
- *
- * Returns a server-rendered HTML page containing article-specific Open Graph,
- * Twitter Card, JSON-LD and SEO meta tags so that ALL social media crawlers
- * (WhatsApp, Facebook, X/Twitter, LinkedIn, Telegram, Discord, Reddit,
- *  Pinterest, Slack, Teams, iMessage, Threads, Messenger…) receive the correct
- * metadata without needing a browser/JavaScript.
- *
- * Human visitors get the same HTML shell; the embedded <script> sets
- * window.__DX_INITIAL_SLUG__ so the React SPA auto-opens the matching article
- * modal after hydration.
+ * Full dynamic meta tags for news articles.
  */
-router.get('/:slug', async (req, res) => {
+router.get('/news/:slug', async (req, res) => {
   const { slug } = req.params;
-
   try {
     const post = await Post.findOne({ slug, status: 'published' }).populate('author', 'name email');
-
     if (!post) {
-      // Article not found — return 404 with default DX SPORTS meta
-      const html = generateMetaHtml(null, slug);
-      return res.status(404).set('Content-Type', 'text/html').send(html);
+      const html = generateMetaHtml(null, slug, req);
+      return res.status(404).set('Content-Type', 'text/html; charset=utf-8').send(html);
     }
 
-    const html = generateMetaHtml(post, slug);
-
-    // Cache: allow public CDN/proxy caching for 5 minutes,
-    // stale-while-revalidate for 10 more minutes.
-    // This is short enough that updated articles are re-crawled quickly.
+    const html = generateMetaHtml(post, slug, req);
     res
       .status(200)
       .set('Content-Type', 'text/html; charset=utf-8')
       .set('Cache-Control', 'public, max-age=300, stale-while-revalidate=600')
       .send(html);
-
   } catch (err) {
-    console.error('[MetaRoute] Error generating meta page for slug:', slug, err.message);
-    // Fail gracefully — return default meta rather than crashing
-    const html = generateMetaHtml(null, slug);
-    res.status(500).set('Content-Type', 'text/html').send(html);
+    console.error('[MetaRoute] Error generating meta for news slug:', slug, err.message);
+    const html = generateMetaHtml(null, slug, req);
+    res.status(500).set('Content-Type', 'text/html; charset=utf-8').send(html);
+  }
+});
+
+/**
+ * GET /match/:id or /fixtures/:id
+ * Dynamic meta tags for specific match fixture.
+ */
+router.get(['/match/:id', '/fixtures/:id'], async (req, res) => {
+  const { id } = req.params;
+  try {
+    const match = await Match.findById(id).populate('homeTeam awayTeam league');
+    if (!match) {
+      const html = generateFixturesCenterMetaHtml(req);
+      return res.status(200).set('Content-Type', 'text/html; charset=utf-8').send(html);
+    }
+
+    const html = generateFixtureMetaHtml(match, id, req);
+    res
+      .status(200)
+      .set('Content-Type', 'text/html; charset=utf-8')
+      .set('Cache-Control', 'public, max-age=120, stale-while-revalidate=300')
+      .send(html);
+  } catch (err) {
+    console.error('[MetaRoute] Error generating meta for match ID:', id, err.message);
+    const html = generateFixturesCenterMetaHtml(req);
+    res.status(200).set('Content-Type', 'text/html; charset=utf-8').send(html);
+  }
+});
+
+/**
+ * GET /fixtures
+ * Dynamic meta tags for match center / fixtures hub.
+ */
+router.get('/fixtures', async (req, res) => {
+  try {
+    const html = generateFixturesCenterMetaHtml(req);
+    res
+      .status(200)
+      .set('Content-Type', 'text/html; charset=utf-8')
+      .set('Cache-Control', 'public, max-age=300, stale-while-revalidate=600')
+      .send(html);
+  } catch (err) {
+    console.error('[MetaRoute] Error generating fixtures hub meta:', err.message);
+    res.status(500).sendFile(require('path').join(__dirname, '../../public/index.html'));
+  }
+});
+
+/**
+ * GET /table, /table/:leagueCode, /standings
+ * Dynamic meta tags for league standings table.
+ */
+router.get(['/table', '/table/:leagueCode', '/standings'], async (req, res) => {
+  try {
+    let league = null;
+    const { leagueCode } = req.params;
+    if (leagueCode) {
+      league = await League.findOne({
+        $or: [
+          { code: leagueCode.toUpperCase() },
+          { shortName: new RegExp(`^${leagueCode}$`, 'i') }
+        ]
+      });
+    }
+
+    if (!league) {
+      league = await League.findOne({ code: 'NPFL' });
+    }
+
+    const standings = league
+      ? await Standings.find({ league: league._id }).populate('team').sort({ position: 1, points: -1 })
+      : await Standings.find().populate('team').sort({ position: 1, points: -1 }).limit(20);
+
+    const html = generateTableMetaHtml(standings, league, req);
+    res
+      .status(200)
+      .set('Content-Type', 'text/html; charset=utf-8')
+      .set('Cache-Control', 'public, max-age=300, stale-while-revalidate=600')
+      .send(html);
+  } catch (err) {
+    console.error('[MetaRoute] Error generating table meta:', err.message);
+    res.status(500).sendFile(require('path').join(__dirname, '../../public/index.html'));
   }
 });
 

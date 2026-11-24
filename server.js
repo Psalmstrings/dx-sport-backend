@@ -62,11 +62,11 @@ app.use('/api/v1/leagues', leagueRoutes);
 app.use('/api/v1/transfers', transferRoutes);
 app.use('/api/v1/analytics', analyticsRoutes);
 
-// ── Social Media Meta Route ──────────────────────────────────────────────────
-// MUST be mounted BEFORE the SPA catch-all so that social crawlers requesting
-// GET /news/:slug receive server-rendered HTML with full OG/Twitter/JSON-LD
-// metadata rather than the generic admin index.html.
-app.use('/news', metaRoutes);
+// ── Social Media & SEO Dynamic Meta Routes ─────────────────────────────────
+// Mounted BEFORE the SPA catch-all so that social crawlers requesting news,
+// fixtures, matches, and tables receive server-rendered HTML with rich
+// Open Graph, Twitter Cards, WhatsApp microdata and Schema.org JSON-LD.
+app.use(metaRoutes);
 
 // Single Page Web Dashboard entry route (catch-all for all other paths)
 app.use((req, res, next) => {
