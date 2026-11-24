@@ -2,16 +2,37 @@
 
 const express = require('express');
 const router = express.Router();
+const mongoose = require('mongoose');
 const Post = require('../models/Post');
 const Match = require('../models/Match');
 const Standings = require('../models/Standings');
 const League = require('../models/League');
 const {
   generateMetaHtml,
+  generateNewsHubMetaHtml,
   generateFixtureMetaHtml,
   generateFixturesCenterMetaHtml,
   generateTableMetaHtml
 } = require('../utils/metaGenerator');
+
+/**
+ * GET /news
+ * Dynamic meta tags for news hub.
+ */
+router.get('/news', async (req, res) => {
+  try {
+    const html = generateNewsHubMetaHtml(req);
+    res
+      .status(200)
+      .set('Content-Type', 'text/html; charset=utf-8')
+      .set('Cache-Control', 'public, max-age=300, stale-while-revalidate=600')
+      .send(html);
+  } catch (err) {
+    console.error('[MetaRoute] Error generating news hub meta:', err.message);
+    const html = generateNewsHubMetaHtml(req);
+    res.status(500).set('Content-Type', 'text/html; charset=utf-8').send(html);
+  }
+});
 
 /**
  * GET /news/:slug
@@ -20,13 +41,32 @@ const {
 router.get('/news/:slug', async (req, res) => {
   const { slug } = req.params;
   try {
-    const post = await Post.findOne({ slug, status: 'published' }).populate('author', 'name email');
+    const cleanSlug = (slug || '').trim();
+    const queryConditions = [
+      { slug: new RegExp(`^${cleanSlug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+    ];
+    if (mongoose.isValidObjectId(cleanSlug)) {
+      queryConditions.push({ _id: cleanSlug });
+    }
+
+    let post = await Post.findOne({
+      $or: queryConditions,
+      status: 'published'
+    }).populate('author', 'name email');
+
+    // Fallback if status field is omitted or varied in database
     if (!post) {
-      const html = generateMetaHtml(null, slug, req);
+      post = await Post.findOne({
+        $or: queryConditions
+      }).populate('author', 'name email');
+    }
+
+    if (!post) {
+      const html = generateMetaHtml(null, cleanSlug, req);
       return res.status(404).set('Content-Type', 'text/html; charset=utf-8').send(html);
     }
 
-    const html = generateMetaHtml(post, slug, req);
+    const html = generateMetaHtml(post, cleanSlug, req);
     res
       .status(200)
       .set('Content-Type', 'text/html; charset=utf-8')

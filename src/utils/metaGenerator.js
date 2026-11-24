@@ -14,8 +14,14 @@ const DEFAULT_OG_IMAGE_TYPE = 'image/png';
  */
 function getBaseUrl(req) {
   if (req) {
+    const forwardedHost = req.get('x-forwarded-host');
+    if (forwardedHost) {
+      const proto = req.get('x-forwarded-proto') || 'https';
+      const cleanHost = forwardedHost.split(',')[0].trim();
+      return `${proto}://${cleanHost}`;
+    }
     const host = req.get('host');
-    if (host) {
+    if (host && !host.includes('onrender.com') && !host.includes('localhost:5000')) {
       const isSecure = req.secure || req.get('x-forwarded-proto') === 'https';
       const protocol = isSecure ? 'https' : (process.env.NODE_ENV === 'production' ? 'https' : (req.protocol || 'http'));
       return `${protocol}://${host}`;
@@ -68,14 +74,27 @@ function getMimeType(url) {
 }
 
 /**
- * Ensure an image URL is absolute HTTPS.
+ * Ensure an image URL is absolute HTTPS and optimized for social sharing cards.
  */
 function toAbsoluteImageUrl(url, baseUrl = DEFAULT_SITE_URL) {
   if (!url || typeof url !== 'string') return DEFAULT_OG_IMAGE;
-  if (url.startsWith('data:')) return DEFAULT_OG_IMAGE;
-  if (url.startsWith('http://') || url.startsWith('https://')) return url;
-  if (url.startsWith('/')) return `${baseUrl}${url}`;
-  return `${baseUrl}/${url}`;
+  let clean = url.trim();
+  if (!clean || clean.startsWith('data:')) return DEFAULT_OG_IMAGE;
+
+  // Upgrade http:// to https:// (WhatsApp, Twitter, Facebook require secure images)
+  if (clean.startsWith('http://')) {
+    clean = 'https://' + clean.slice(7);
+  }
+
+  // Optimize Cloudinary images for social cards: 1200x630 JPEG < 300KB
+  if (clean.includes('res.cloudinary.com') && clean.includes('/image/upload/') && !clean.includes('w_') && !clean.includes('c_fill')) {
+    clean = clean.replace('/image/upload/', '/image/upload/c_fill,w_1200,h_630,q_auto,f_jpg/');
+  }
+
+  if (clean.startsWith('https://')) return clean;
+  if (clean.startsWith('//')) return `https:${clean}`;
+  if (clean.startsWith('/')) return `${baseUrl}${clean}`;
+  return `${baseUrl}/${clean}`;
 }
 
 /**
@@ -150,7 +169,7 @@ function renderHtmlShell({
   <title>${pageTitle}</title>
   <meta name="title" content="${pageTitle}" />
   <meta name="description" content="${description}" />
-  <meta name="robots" content="index, follow" />
+  <meta name="robots" content="index, follow, max-image-preview:large" />
   <meta name="author" content="${escapeHtml(author)}" />
   <meta name="theme-color" content="#000b3d" />
   <link rel="canonical" href="${canonicalUrl}" />
@@ -184,6 +203,8 @@ ${extraMeta}
   <meta name="twitter:description" content="${description}" />
   <meta name="twitter:image" content="${ogImage}" />
   <meta name="twitter:image:alt" content="${pageTitle}" />
+  <meta name="twitter:url" content="${canonicalUrl}" />
+  <meta name="twitter:domain" content="dxsportz.com" />
 
   <!-- Favicon -->
   <link rel="icon" type="image/png" href="/og-default.png" />
@@ -454,12 +475,44 @@ function generateTableMetaHtml(standings = [], league = null, req = null) {
   });
 }
 
+/**
+ * 5. General News Hub Meta HTML Generator
+ */
+function generateNewsHubMetaHtml(req = null) {
+  const baseUrl = getBaseUrl(req);
+  const pageTitle = `Latest Football News, NPFL Updates & Transfers | ${SITE_NAME}`;
+  const description = 'Read the latest football news, NPFL match reports, Super Eagles headlines, European league updates, and transfer exclusives on DX SPORTS.';
+  const canonicalUrl = `${baseUrl}/news`;
+
+  const jsonLd = {
+    '@context': 'https://schema.org',
+    '@type': 'NewsMediaOrganization',
+    name: `${SITE_NAME} - News Hub`,
+    url: canonicalUrl,
+    logo: DEFAULT_OG_IMAGE,
+    description
+  };
+
+  return renderHtmlShell({
+    pageTitle,
+    description,
+    canonicalUrl,
+    ogType: 'website',
+    ogImage: DEFAULT_OG_IMAGE,
+    ogImageType: DEFAULT_OG_IMAGE_TYPE,
+    author: SITE_NAME,
+    jsonLd,
+    initialRoute: { type: 'NEWS' }
+  });
+}
+
 function generateDefaultMetaHtml(req = null) {
   return generateMetaHtml(null, null, req);
 }
 
 module.exports = {
   generateMetaHtml,
+  generateNewsHubMetaHtml,
   generateFixtureMetaHtml,
   generateFixturesCenterMetaHtml,
   generateTableMetaHtml,
